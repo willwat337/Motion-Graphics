@@ -74,10 +74,10 @@ const TIMING = {
 
   cardsInStart: 0.10,   // first card begins fading in
   cardsInStagger: 0.12, // delay between cards
-  cardsInDur: 1.10,     // each card's fade/scale-in duration
+  cardsInDur: 1.30,     // each card's fade/scale-in duration
 
   cardsMoveStart: 1.5,  // drift / turn / bob begins
-  cardsMoveRamp: 2.0,   // how long bob + turn take to reach full strength
+  cardsMoveRamp: 3.0,   // how long bob + turn take to reach full strength
 
   sheenStart: 2.0,      // first card's sheen sweep
   sheenStagger: 0.55,
@@ -105,11 +105,12 @@ const CARD = {
   width: 470,
   height: 470 * 54 / 85.6,    // real card ratio
   radius: 22,
-  bobAmp: 12,                  // px
-  bobPeriod: 3.6,              // s
-  turnAmp: 0.42,               // radians of fake Y-axis turn
-  turnPeriod: 5.2,             // s
-  fanScaleFrom: 0.86,
+  bobAmp: 9,                   // px
+  bobPeriod: 5.0,              // s
+  turnAmp: 0.30,               // radians of fake Y-axis turn
+  turnPeriod: 8.0,             // s
+  fanScaleFrom: 0.90,
+  renderScale: 2,              // cached card art resolution (keeps it crisp during push-in)
 };
 
 // Drawn back-to-front (last item is on top).
@@ -179,7 +180,7 @@ const font = (weight, size) => `italic ${weight} ${size}px ${FONT_FAMILY}`;
    ===================================================================== */
 
 const canvas = document.getElementById('stage');
-const ctx = canvas.getContext('2d');
+let ctx = canvas.getContext('2d'); // swapped temporarily while building cached art
 const { width: W, height: H, duration: D } = STAGE;
 
 const bgGradient = (() => {
@@ -219,7 +220,8 @@ function cardState(card, i, t) {
   // Intro: fade + scale in as a tight fan
   const inP = Ease.outCubic(progress(t, TIMING.cardsInStart + i * TIMING.cardsInStagger, TIMING.cardsInDur));
   // Drift apart
-  const moveP = Ease.inOutCubic(progress(t, TIMING.cardsMoveStart, D - TIMING.cardsMoveStart));
+  // inOutSine: gentle, low peak speed (inOutCubic surged mid-move)
+  const moveP = Ease.inOutSine(progress(t, TIMING.cardsMoveStart, D - TIMING.cardsMoveStart));
   // Bob + turn strength ramps in smoothly so there is no pop at 1.5s
   const ramp = Ease.inOutSine(progress(t, TIMING.cardsMoveStart, TIMING.cardsMoveRamp));
   const local = Math.max(0, t - TIMING.cardsMoveStart);
@@ -276,130 +278,205 @@ function drawContactless(x, y) {
   }
 }
 
-function drawCard(card, s) {
+/* ---------- Cached artwork --------------------------------------------
+   Blurred shadows and gradients are expensive. Each card face, the card
+   shadow and each text line are drawn ONCE into offscreen canvases, and
+   every frame just places those images. This keeps playback and
+   recording at a steady 60fps.
+   ---------------------------------------------------------------------- */
+
+function makeCanvas(w, h) {
+  const c = document.createElement('canvas');
+  c.width = Math.ceil(w);
+  c.height = Math.ceil(h);
+  return c;
+}
+
+function buildCardFace(card) {
+  const S = CARD.renderScale;
+  const w = CARD.width, h = CARD.height, r = CARD.radius;
+  const c = makeCanvas(w * S, h * S);
+  const g = c.getContext('2d');
+  g.scale(S, S);
+  const prev = ctx;
+  ctx = g; // reuse the drawing helpers below
+
+  const body = g.createLinearGradient(0, 0, w, h);
+  body.addColorStop(0, mix(card.color, '#ffffff', 0.22));
+  body.addColorStop(0.55, card.color);
+  body.addColorStop(1, mix(card.color, '#000000', 0.28));
+  roundRectPath(g, 0, 0, w, h, r);
+  g.fillStyle = body;
+  g.fill();
+
+  g.save();
+  roundRectPath(g, 0, 0, w, h, r);
+  g.clip();
+  const gloss = g.createLinearGradient(0, 0, 0, h * 0.55);
+  gloss.addColorStop(0, 'rgba(255,255,255,0.26)');
+  gloss.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gloss;
+  g.fillRect(0, 0, w, h);
+  const diag = g.createLinearGradient(0, 0, w, h);
+  diag.addColorStop(0.30, 'rgba(255,255,255,0)');
+  diag.addColorStop(0.42, 'rgba(255,255,255,0.10)');
+  diag.addColorStop(0.50, 'rgba(255,255,255,0)');
+  g.fillStyle = diag;
+  g.fillRect(0, 0, w, h);
+  g.restore();
+
+  roundRectPath(g, 0.75, 0.75, w - 1.5, h - 1.5, r);
+  g.strokeStyle = 'rgba(255,255,255,0.28)';
+  g.lineWidth = 1.5;
+  g.stroke();
+
+  const chipW = w * 0.14, chipH = chipW * 0.78;
+  const chipX = w * 0.09, chipY = h * 0.30;
+  drawChip(chipX, chipY, chipW, chipH);
+  drawContactless(chipX + chipW + 26, chipY + chipH / 2);
+
+  g.save();
+  g.shadowColor = 'rgba(0,0,0,0.18)';
+  g.shadowBlur = 8 * S;
+  g.shadowOffsetY = 3 * S;
+  g.fillStyle = COLORS.cardInk;
+  g.textBaseline = 'alphabetic';
+  g.textAlign = 'right';
+  g.font = font(700, Math.round(h * 0.38));
+  g.fillText(card.rate, w - 30, h - 30);
+  g.globalAlpha = 0.8;
+  g.textAlign = 'left';
+  g.font = font(400, 24);
+  g.fillText('annual rate', 32, h - 36);
+  g.restore();
+
+  ctx = prev;
+  return c;
+}
+
+function buildCardShadow() {
+  // Blurred silhouette, drawn off-canvas so only its shadow lands inside.
+  const S = CARD.renderScale;
+  const pad = SHADOW.cardBlur * 1.5;
+  const w = CARD.width + pad * 2, h = CARD.height + pad * 2;
+  const c = makeCanvas(w * S, h * S);
+  const g = c.getContext('2d');
+  const far = 10000;
+  g.shadowColor = COLORS.shadow;
+  g.shadowBlur = SHADOW.cardBlur * S;
+  g.shadowOffsetX = far;
+  g.scale(S, S);
+  roundRectPath(g, pad - far / S, pad, CARD.width, CARD.height, CARD.radius);
+  g.fillStyle = '#000';
+  g.fill();
+  return { canvas: c, pad };
+}
+
+function buildTextLine(line) {
+  const S = 2;
+  const meas = makeCanvas(1, 1).getContext('2d');
+  meas.font = font(line.weight, line.size);
+  const m = meas.measureText(line.text);
+  const pad = SHADOW.textBlur * 2 + line.size * 0.15;
+  const ascent = line.size * 1.05, descent = line.size * 0.35;
+  const w = m.width + pad * 2, h = ascent + descent + pad * 2;
+  const c = makeCanvas(w * S, h * S);
+  const g = c.getContext('2d');
+  g.scale(S, S);
+  g.font = font(line.weight, line.size);
+  g.fillStyle = line.color;
+  g.textBaseline = 'alphabetic';
+  g.shadowColor = COLORS.textShadow;
+  g.shadowBlur = SHADOW.textBlur * S;
+  g.shadowOffsetY = SHADOW.textOffsetY * S;
+  g.fillText(line.text, pad, pad + ascent);
+  return { canvas: c, w, h, offX: -pad, offY: -(pad + ascent) };
+}
+
+let cache = null;
+function buildCache() {
+  cache = {
+    faces: CARDS.map(buildCardFace),
+    shadow: buildCardShadow(),
+    text: TEXT_LINES.map(buildTextLine),
+  };
+}
+
+/* ---------- Per-frame drawing ---------------------------------------- */
+
+function applyCardTransform(s) {
+  ctx.rotate(s.rot);
+  ctx.scale(s.scale, s.scale);
+  // Fake Y-axis turn: squash X, skew Y slightly for perspective
+  ctx.transform(Math.cos(s.turn), Math.sin(s.turn) * 0.12, 0, 1, 0, 0);
+}
+
+function drawCard(card, i, s) {
   const w = CARD.width, h = CARD.height, r = CARD.radius;
   const x0 = -w / 2, y0 = -h / 2;
 
   ctx.save();
   ctx.globalAlpha *= s.alpha;
-  ctx.translate(s.x, s.y);
-  ctx.rotate(s.rot);
-  ctx.scale(s.scale, s.scale);
-  // Fake Y-axis turn: squash X, skew Y slightly for perspective
-  ctx.transform(Math.cos(s.turn), Math.sin(s.turn) * 0.12, 0, 1, 0, 0);
 
-  // Body + soft studio shadow
-  const body = ctx.createLinearGradient(x0, y0, x0 + w, y0 + h);
-  body.addColorStop(0, mix(card.color, '#ffffff', 0.22));
-  body.addColorStop(0.55, card.color);
-  body.addColorStop(1, mix(card.color, '#000000', 0.28));
+  // Shadow: follows the card's shape, offset straight down (light from above)
   ctx.save();
-  ctx.shadowColor = COLORS.shadow;
-  ctx.shadowBlur = SHADOW.cardBlur;
-  ctx.shadowOffsetX = SHADOW.cardOffsetX;
-  ctx.shadowOffsetY = SHADOW.cardOffsetY;
-  roundRectPath(ctx, x0, y0, w, h, r);
-  ctx.fillStyle = body;
-  ctx.fill();
+  ctx.translate(s.x + SHADOW.cardOffsetX, s.y + SHADOW.cardOffsetY);
+  applyCardTransform(s);
+  const sh = cache.shadow;
+  ctx.drawImage(sh.canvas, x0 - sh.pad, y0 - sh.pad, w + sh.pad * 2, h + sh.pad * 2);
   ctx.restore();
 
-  // Surface effects, clipped to the card
-  ctx.save();
-  roundRectPath(ctx, x0, y0, w, h, r);
-  ctx.clip();
+  ctx.translate(s.x, s.y);
+  applyCardTransform(s);
+  ctx.drawImage(cache.faces[i], x0, y0, w, h);
 
-  // Top gloss
-  const gloss = ctx.createLinearGradient(0, y0, 0, y0 + h * 0.55);
-  gloss.addColorStop(0, 'rgba(255,255,255,0.26)');
-  gloss.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = gloss;
-  ctx.fillRect(x0, y0, w, h);
-
-  // Static diagonal highlight
-  const diag = ctx.createLinearGradient(x0, y0, x0 + w, y0 + h);
-  diag.addColorStop(0.30, 'rgba(255,255,255,0)');
-  diag.addColorStop(0.42, 'rgba(255,255,255,0.10)');
-  diag.addColorStop(0.50, 'rgba(255,255,255,0)');
-  ctx.fillStyle = diag;
-  ctx.fillRect(x0, y0, w, h);
-
-  // Turn shading: the side turning away darkens
+  // Live overlays: turn shading + sheen sweep
   const shade = Math.abs(Math.sin(s.turn)) * 0.22;
-  if (shade > 0.001) {
-    const side = Math.sign(s.turn);
-    const sg = ctx.createLinearGradient(-side * w / 2, 0, side * w / 2, 0);
-    sg.addColorStop(0, 'rgba(0,0,0,0)');
-    sg.addColorStop(1, `rgba(0,0,0,${shade})`);
-    ctx.fillStyle = sg;
-    ctx.fillRect(x0, y0, w, h);
-  }
-
-  // Sweeping sheen (once per card)
-  if (s.sheen > 0 && s.sheen < 1) {
-    const sx = lerp(-w * 0.95, w * 0.95, s.sheen);
+  const sheenOn = s.sheen > 0 && s.sheen < 1;
+  if (shade > 0.002 || sheenOn) {
     ctx.save();
-    ctx.translate(sx, 0);
-    ctx.rotate(deg(24));
-    const band = 110;
-    const sh = ctx.createLinearGradient(-band, 0, band, 0);
-    sh.addColorStop(0, 'rgba(255,255,255,0)');
-    sh.addColorStop(0.5, 'rgba(255,255,255,0.42)');
-    sh.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = sh;
-    ctx.fillRect(-band, -h * 1.5, band * 2, h * 3);
+    roundRectPath(ctx, x0, y0, w, h, r);
+    ctx.clip();
+    if (shade > 0.002) {
+      const side = Math.sign(s.turn);
+      const sg = ctx.createLinearGradient(-side * w / 2, 0, side * w / 2, 0);
+      sg.addColorStop(0, 'rgba(0,0,0,0)');
+      sg.addColorStop(1, `rgba(0,0,0,${shade})`);
+      ctx.fillStyle = sg;
+      ctx.fillRect(x0, y0, w, h);
+    }
+    if (sheenOn) {
+      ctx.translate(lerp(-w * 0.95, w * 0.95, s.sheen), 0);
+      ctx.rotate(deg(24));
+      const band = 110;
+      const sg = ctx.createLinearGradient(-band, 0, band, 0);
+      sg.addColorStop(0, 'rgba(255,255,255,0)');
+      sg.addColorStop(0.5, 'rgba(255,255,255,0.42)');
+      sg.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = sg;
+      ctx.fillRect(-band, -h * 1.5, band * 2, h * 3);
+    }
     ctx.restore();
   }
-  ctx.restore();
-
-  // Hairline edge
-  roundRectPath(ctx, x0 + 0.75, y0 + 0.75, w - 1.5, h - 1.5, r);
-  ctx.strokeStyle = 'rgba(255,255,255,0.28)';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  // EMV chip + contactless mark
-  const chipW = w * 0.14, chipH = chipW * 0.78;
-  const chipX = x0 + w * 0.09, chipY = y0 + h * 0.30;
-  drawChip(chipX, chipY, chipW, chipH);
-  drawContactless(chipX + chipW + 26, chipY + chipH / 2);
-
-  // Rate
-  ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,0.18)';
-  ctx.shadowBlur = 8;
-  ctx.shadowOffsetY = 3;
-  ctx.fillStyle = COLORS.cardInk;
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'alphabetic';
-  ctx.font = font(700, Math.round(h * 0.38));
-  ctx.fillText(card.rate, x0 + w - 30, y0 + h - 30);
-  ctx.globalAlpha *= 0.8;
-  ctx.textAlign = 'left';
-  ctx.font = font(400, 24);
-  ctx.fillText('annual rate', x0 + 32, y0 + h - 36);
-  ctx.restore();
 
   ctx.restore();
 }
 
 function drawText(t) {
-  ctx.save();
-  ctx.textBaseline = 'alphabetic';
-  ctx.textAlign = 'left';
-  ctx.shadowColor = COLORS.textShadow;
-  ctx.shadowBlur = SHADOW.textBlur;
-  ctx.shadowOffsetY = SHADOW.textOffsetY;
   TEXT_LINES.forEach((line, i) => {
     const p = Ease.outQuart(progress(t, TIMING.textStart + i * TIMING.textStagger, TIMING.textDur));
     if (p <= 0) return;
+    const img = cache.text[i];
     ctx.save();
     ctx.globalAlpha *= p;
-    ctx.font = font(line.weight, line.size);
-    ctx.fillStyle = line.color;
-    ctx.fillText(line.text, LAYOUT.textX + line.x, line.y + (1 - p) * TIMING.textRise);
+    ctx.drawImage(
+      img.canvas,
+      LAYOUT.textX + line.x + img.offX,
+      line.y + (1 - p) * TIMING.textRise + img.offY,
+      img.w, img.h
+    );
     ctx.restore();
   });
-  ctx.restore();
 }
 
 function render(t) {
@@ -417,7 +494,7 @@ function render(t) {
 
   // Content fades out at loop end so the restart is clean
   ctx.globalAlpha = 1 - Ease.inOutSine(progress(t, D - TIMING.loopFadeOut, TIMING.loopFadeOut));
-  CARDS.forEach((card, i) => drawCard(card, cardState(card, i, t)));
+  CARDS.forEach((card, i) => drawCard(card, i, cardState(card, i, t)));
   drawText(t);
 }
 
@@ -498,6 +575,10 @@ Promise.race([
   ]),
   new Promise(res => setTimeout(res, 3000)),
 ]).then(() => {
+  buildCache();
+  // Frame-perfect export hook: ?export pauses playback and exposes renderFrame(t)
+  window.renderFrame = render;
+  if (params.has('export')) { document.querySelector('.ui').remove(); window.sceneReady = true; return; }
   startTime = performance.now();
   requestAnimationFrame(frame);
 });
