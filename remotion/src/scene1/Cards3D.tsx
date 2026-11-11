@@ -115,17 +115,20 @@ function cardState(card: CardSpec, i: number, t: number) {
 
 const StudioEnvironment: React.FC = () => {
   const { gl, scene } = useThree();
-  useEffect(() => {
+  // Built synchronously so the very first rendered frame already has it
+  // (a useEffect would leave frame 1 unlit, making stills differ from video).
+  const [env] = useState(() => {
     const pmrem = new THREE.PMREMGenerator(gl);
-    const env = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    scene.environment = env;
-    scene.environmentIntensity = LIGHTING.environment;
-    return () => {
-      scene.environment = null;
-      env.dispose();
-      pmrem.dispose();
-    };
-  }, [gl, scene]);
+    const tex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    pmrem.dispose();
+    return tex;
+  });
+  scene.environment = env;
+  scene.environmentIntensity = LIGHTING.environment;
+  useEffect(() => () => {
+    scene.environment = null;
+    env.dispose();
+  }, [env, scene]);
   return null;
 };
 

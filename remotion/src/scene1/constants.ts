@@ -69,9 +69,9 @@ export const CARD = {
 };
 
 export const LIGHTING = {
-  ambient: 0.9,
-  key: { intensity: 2.3, position: [-300, 700, 1500] as [number, number, number] },
-  environment: 0.7, // glossy reflections from a neutral studio environment
+  ambient: 0.75,
+  key: { intensity: 1.1, position: [-300, 700, 1500] as [number, number, number] },
+  environment: 0.3, // glossy reflections from a neutral studio environment
   shadowOpacity: 0.24,
   shadowSoftness: 22, // blur radius
   shadowPlaneZ: -120, // distance behind the cards that the shadow falls on
